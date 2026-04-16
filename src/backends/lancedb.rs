@@ -59,6 +59,10 @@ impl LanceDbBackend {
         &self.connection
     }
 
+    pub fn vector_dimensions(&self) -> i32 {
+        self.vector_dimensions
+    }
+
     fn articles_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("text", DataType::Utf8, false),
@@ -90,15 +94,13 @@ impl LanceDbBackend {
         let text_values = Arc::new(StringArray::from_iter_values(
             data.iter().map(|article| article.text.as_str()),
         ));
-        let vector_values = Arc::new(FixedSizeListArray::from_iter_primitive::<
-            Float32Type,
-            _,
-            _,
-        >(
-            data.iter()
-                .map(|article| Some(article.vector.iter().copied().map(Some))),
-            self.vector_dimensions,
-        ));
+        let vector_values = Arc::new(
+            FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                data.iter()
+                    .map(|article| Some(article.vector.iter().copied().map(Some))),
+                self.vector_dimensions,
+            ),
+        );
 
         Ok(RecordBatch::try_new(
             self.articles_schema(),
@@ -189,7 +191,10 @@ mod tests {
         let backend = LanceDbBackend::new(temp_dir.path(), 5).await.unwrap();
 
         backend.create_table().await.unwrap();
-        backend.insert_data(&five_dimensional_articles()).await.unwrap();
+        backend
+            .insert_data(&five_dimensional_articles())
+            .await
+            .unwrap();
 
         let reopened = backend
             .connection()

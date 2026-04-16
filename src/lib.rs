@@ -1,4 +1,7 @@
 pub mod backends;
+pub mod chunking;
+
+pub use chunking::{ChunkingConfig, ChunkingError, chunk_text};
 
 pub struct RKit;
 
