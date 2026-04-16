@@ -6,8 +6,15 @@ edition = "2024"
 [dependencies]
 arrow-array = "57.3.0"
 arrow-schema = "57.3.0"
+hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls", "ureq"] }
 lancedb = "0.27.2"
+ndarray = "0.17.2"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "copy-dylibs", "download-binaries", "ndarray", "std", "tls-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = "0.22.2"
 
 [dev-dependencies]
+ahash = "0.8"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
