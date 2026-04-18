@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use hf_hub::api::sync::ApiBuilder;
 use hf_hub::{Repo, RepoType};
@@ -17,12 +18,14 @@ const DEFAULT_TOKENIZER_FILE: &str = "tokenizer.json";
 const DEFAULT_POOLING_CONFIG_FILE: &str = "1_Pooling/config.json";
 const DEFAULT_TRANSFORMER_CONFIG_FILE: &str = "config.json";
 const DEFAULT_MAX_LENGTH: usize = 128;
+type EncodedInputs = (Array2<i64>, Array2<i64>, Option<Array2<i64>>);
 
+#[allow(async_fn_in_trait)]
 pub trait EmbeddingsProvider {
-    fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError>;
+    async fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError>;
 
-    fn embed(&mut self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        let mut embeddings = self.embed_batch(&[text.to_owned()])?;
+    async fn embed(&mut self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        let mut embeddings = self.embed_batch(&[text.to_owned()]).await?;
         embeddings.pop().ok_or(EmbeddingError::MissingOutput(
             "no embeddings returned".to_string(),
         ))
@@ -78,13 +81,8 @@ impl Default for EmbeddingsConfig {
 
 #[derive(Debug)]
 pub struct OrtEmbedder {
-    tokenizer: Tokenizer,
-    session: Session,
-    input_names: SessionInputNames,
-    output_name: Option<String>,
+    inner: Arc<Mutex<OrtEmbedderInner>>,
     max_length: usize,
-    normalize: bool,
-    expected_embedding_size: Option<usize>,
 }
 
 impl OrtEmbedder {
@@ -113,24 +111,35 @@ impl OrtEmbedder {
         let output_name = select_output_name(&session, config.output_name.as_deref())?;
 
         Ok(Self {
-            tokenizer,
-            session,
-            input_names,
-            output_name,
+            inner: Arc::new(Mutex::new(OrtEmbedderInner {
+                tokenizer,
+                session,
+                input_names,
+                output_name,
+                normalize: config.normalize,
+                expected_embedding_size,
+            })),
             max_length,
-            normalize: config.normalize,
-            expected_embedding_size,
         })
     }
 
     pub fn max_length(&self) -> usize {
         self.max_length
     }
+}
 
-    fn encode_inputs(
-        &self,
-        texts: &[String],
-    ) -> Result<(Array2<i64>, Array2<i64>, Option<Array2<i64>>), EmbeddingError> {
+#[derive(Debug)]
+struct OrtEmbedderInner {
+    tokenizer: Tokenizer,
+    session: Session,
+    input_names: SessionInputNames,
+    output_name: Option<String>,
+    normalize: bool,
+    expected_embedding_size: Option<usize>,
+}
+
+impl OrtEmbedderInner {
+    fn encode_inputs(&self, texts: &[String]) -> Result<EncodedInputs, EmbeddingError> {
         let encodings = self
             .tokenizer
             .encode_batch(texts.iter().map(String::as_str).collect(), true)
@@ -257,13 +266,22 @@ impl OrtEmbedder {
 }
 
 impl EmbeddingsProvider for OrtEmbedder {
-    fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    async fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let (input_ids, attention_mask, token_type_ids) = self.encode_inputs(texts)?;
-        self.run_inference(input_ids, attention_mask, token_type_ids)
+        let inner = Arc::clone(&self.inner);
+        let texts = texts.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut inner = inner.lock().map_err(|error| {
+                EmbeddingError::State(format!("embedder state poisoned: {error}"))
+            })?;
+            let (input_ids, attention_mask, token_type_ids) = inner.encode_inputs(&texts)?;
+            inner.run_inference(input_ids, attention_mask, token_type_ids)
+        })
+        .await
+        .map_err(|error| EmbeddingError::BlockingTask(error.to_string()))?
     }
 }
 
@@ -280,6 +298,8 @@ pub enum EmbeddingError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Ort(String),
+    State(String),
+    BlockingTask(String),
     Tokenizer(tokenizers::Error),
 }
 
@@ -306,6 +326,8 @@ impl std::fmt::Display for EmbeddingError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Ort(error) => write!(f, "{error}"),
+            Self::State(error) => write!(f, "{error}"),
+            Self::BlockingTask(error) => write!(f, "embedding task failed: {error}"),
             Self::Tokenizer(error) => write!(f, "{error}"),
         }
     }

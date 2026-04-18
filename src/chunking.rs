@@ -170,12 +170,11 @@ fn choose_overlap_start(
         .max(start_char + 1);
     let search_end = (desired_start + OVERLAP_WINDOW).min(end_char.saturating_sub(1));
 
-    if search_start <= search_end {
-        if let Some(boundary) =
+    if search_start <= search_end
+        && let Some(boundary) =
             nearest_semantic_boundary(chars, boundaries, search_start, search_end, desired_start)
-        {
-            return boundary;
-        }
+    {
+        return boundary;
     }
 
     end_char

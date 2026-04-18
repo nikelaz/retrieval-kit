@@ -9,6 +9,7 @@ use lancedb::{Connection, Error, Result, Table, connect};
 const ARTICLES_TABLE_NAME: &str = "articles";
 
 pub struct Article {
+    pub document_id: String,
     pub text: String,
     pub vector: Vec<f32>,
 }
@@ -38,7 +39,7 @@ impl LanceDbBackend {
     pub async fn create_table(&self) -> Result<Table> {
         self.connection
             .create_empty_table(ARTICLES_TABLE_NAME, self.articles_schema())
-            .mode(CreateTableMode::Overwrite)
+            .mode(CreateTableMode::exist_ok(|request| request))
             .execute()
             .await
     }
@@ -65,6 +66,7 @@ impl LanceDbBackend {
 
     fn articles_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
+            Field::new("document_id", DataType::Utf8, false),
             Field::new("text", DataType::Utf8, false),
             Field::new(
                 "vector",
@@ -91,6 +93,9 @@ impl LanceDbBackend {
             }
         }
 
+        let document_id_values = Arc::new(StringArray::from_iter_values(
+            data.iter().map(|article| article.document_id.as_str()),
+        ));
         let text_values = Arc::new(StringArray::from_iter_values(
             data.iter().map(|article| article.text.as_str()),
         ));
@@ -104,7 +109,7 @@ impl LanceDbBackend {
 
         Ok(RecordBatch::try_new(
             self.articles_schema(),
-            vec![text_values, vector_values],
+            vec![document_id_values, text_values, vector_values],
         )?)
     }
 }
@@ -117,18 +122,22 @@ mod tests {
     fn demo_articles() -> Vec<Article> {
         vec![
             Article {
+                document_id: "demo-doc".to_string(),
                 text: "knight".to_string(),
                 vector: vec![0.9, 0.4, 0.8],
             },
             Article {
+                document_id: "demo-doc".to_string(),
                 text: "ranger".to_string(),
                 vector: vec![0.8, 0.4, 0.7],
             },
             Article {
+                document_id: "demo-doc".to_string(),
                 text: "priest".to_string(),
                 vector: vec![0.6, 0.2, 0.6],
             },
             Article {
+                document_id: "demo-doc".to_string(),
                 text: "rogue".to_string(),
                 vector: vec![0.7, 0.4, 0.7],
             },
@@ -138,10 +147,12 @@ mod tests {
     fn five_dimensional_articles() -> Vec<Article> {
         vec![
             Article {
+                document_id: "five-dim-doc".to_string(),
                 text: "mage".to_string(),
                 vector: vec![0.1, 0.2, 0.3, 0.4, 0.5],
             },
             Article {
+                document_id: "five-dim-doc".to_string(),
                 text: "paladin".to_string(),
                 vector: vec![0.5, 0.4, 0.3, 0.2, 0.1],
             },
@@ -175,6 +186,24 @@ mod tests {
 
         backend.create_table().await.unwrap();
         backend.insert_data(&demo_articles()).await.unwrap();
+
+        let reopened = backend
+            .connection()
+            .open_table(ARTICLES_TABLE_NAME)
+            .execute()
+            .await
+            .unwrap();
+        assert_eq!(reopened.count_rows(None).await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn create_table_is_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let backend = LanceDbBackend::new(temp_dir.path(), 3).await.unwrap();
+
+        backend.create_table().await.unwrap();
+        backend.insert_data(&demo_articles()).await.unwrap();
+        backend.create_table().await.unwrap();
 
         let reopened = backend
             .connection()

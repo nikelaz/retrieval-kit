@@ -4303,6 +4303,8 @@ dependencies = [
  "ahash",
  "arrow-array",
  "arrow-schema",
+ "futures",
+ "glob",
  "hf-hub",
  "lancedb",
  "ndarray 0.17.2",
@@ -4312,6 +4314,7 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
