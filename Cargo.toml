@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 arrow-array = "57.3.0"
 arrow-schema = "57.3.0"
+futures = "0.3"
 glob = "0.3.3"
 hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls", "ureq"] }
 lancedb = "0.27.2"
@@ -19,6 +20,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ahash = "0.8"
-futures = "0.3"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

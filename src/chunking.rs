@@ -1,6 +1,9 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Character-based chunking configuration used by `chunk_text`.
 pub struct ChunkingConfig {
+    /// Target chunk size in Unicode scalar values.
     pub chunk_size: usize,
+    /// Approximate overlap size between adjacent chunks.
     pub overlap_size: usize,
 }
 
@@ -20,6 +23,7 @@ pub enum ChunkingError {
         chunk_size: usize,
         overlap_size: usize,
     },
+    EmbeddingTokenizer,
 }
 
 impl std::fmt::Display for ChunkingError {
@@ -33,6 +37,7 @@ impl std::fmt::Display for ChunkingError {
                 f,
                 "overlap_size ({overlap_size}) must be smaller than chunk_size ({chunk_size})"
             ),
+            Self::EmbeddingTokenizer => write!(f, "failed to tokenize document for chunking"),
         }
     }
 }
@@ -51,6 +56,7 @@ const LOOKBACK_WINDOW: usize = 400;
 const LOOKAHEAD_WINDOW: usize = 200;
 const OVERLAP_WINDOW: usize = 120;
 
+/// Split text into trimmed, non-empty character chunks with approximate overlap.
 pub fn chunk_text(text: &str, config: ChunkingConfig) -> Result<Vec<String>, ChunkingError> {
     validate_config(config)?;
 

@@ -21,6 +21,7 @@ const DEFAULT_MAX_LENGTH: usize = 128;
 type EncodedInputs = (Array2<i64>, Array2<i64>, Option<Array2<i64>>);
 
 #[allow(async_fn_in_trait)]
+/// Provider interface for generating embeddings from text batches.
 pub trait EmbeddingsProvider {
     async fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError>;
 
@@ -33,24 +34,43 @@ pub trait EmbeddingsProvider {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Configuration for the built-in ONNX Runtime embedder.
 pub struct EmbeddingsConfig {
+    /// Hugging Face model repository used when local assets are not supplied.
     pub model_repo: String,
+    /// Hugging Face model revision used when local assets are not supplied.
     pub model_revision: String,
+    /// Model file path inside the Hugging Face repository.
     pub model_file: String,
+    /// Tokenizer file path inside the Hugging Face repository.
     pub tokenizer_file: String,
+    /// Pooling config file path inside the Hugging Face repository.
     pub pooling_config_file: String,
+    /// Transformer config file path inside the Hugging Face repository.
     pub transformer_config_file: String,
+    /// Maximum tokenizer sequence length, capped by model config when known.
     pub max_length: usize,
+    /// Whether output embeddings should be L2-normalized.
     pub normalize: bool,
+    /// Optional ONNX Runtime intra-op thread count.
     pub intra_threads: Option<usize>,
+    /// Optional Hugging Face cache directory.
     pub cache_dir: Option<PathBuf>,
+    /// Local ONNX model path. If unset, the model is resolved from Hugging Face.
     pub local_model_path: Option<PathBuf>,
+    /// Local tokenizer path. If unset, the tokenizer is resolved from Hugging Face.
     pub local_tokenizer_path: Option<PathBuf>,
+    /// Local sentence-transformers pooling config path.
     pub local_pooling_config_path: Option<PathBuf>,
+    /// Local transformer config path.
     pub local_transformer_config_path: Option<PathBuf>,
+    /// Override for models that use a non-standard input IDs name.
     pub input_ids_name: Option<String>,
+    /// Override for models that use a non-standard attention mask name.
     pub attention_mask_name: Option<String>,
+    /// Override for models that use a non-standard token type IDs name.
     pub token_type_ids_name: Option<String>,
+    /// Optional output tensor name. Defaults to the first model output.
     pub output_name: Option<String>,
 }
 
@@ -80,6 +100,7 @@ impl Default for EmbeddingsConfig {
 }
 
 #[derive(Debug)]
+/// ONNX Runtime sentence embedding provider.
 pub struct OrtEmbedder {
     inner: Arc<Mutex<OrtEmbedderInner>>,
     max_length: usize,
@@ -126,6 +147,29 @@ impl OrtEmbedder {
     pub fn max_length(&self) -> usize {
         self.max_length
     }
+
+    pub fn expected_embedding_size(&self) -> Option<usize> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.expected_embedding_size)
+    }
+
+    pub fn chunk_text(
+        &self,
+        text: &str,
+        overlap_tokens: usize,
+    ) -> Result<Vec<String>, EmbeddingError> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|error| EmbeddingError::State(format!("embedder state poisoned: {error}")))?;
+        inner.chunk_text(text, self.max_length, overlap_tokens)
+    }
 }
 
 #[derive(Debug)]
@@ -139,6 +183,15 @@ struct OrtEmbedderInner {
 }
 
 impl OrtEmbedderInner {
+    fn chunk_text(
+        &self,
+        text: &str,
+        max_length: usize,
+        overlap_tokens: usize,
+    ) -> Result<Vec<String>, EmbeddingError> {
+        chunk_text_with_tokenizer(&self.tokenizer, text, max_length, overlap_tokens)
+    }
+
     fn encode_inputs(&self, texts: &[String]) -> Result<EncodedInputs, EmbeddingError> {
         let encodings = self
             .tokenizer
@@ -265,8 +318,71 @@ impl OrtEmbedderInner {
     }
 }
 
+fn chunk_text_with_tokenizer(
+    tokenizer: &Tokenizer,
+    text: &str,
+    max_length: usize,
+    overlap_tokens: usize,
+) -> Result<Vec<String>, EmbeddingError> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_content_tokens = max_length.saturating_sub(2).max(1);
+    let overlap_tokens = overlap_tokens.min(max_content_tokens.saturating_sub(1));
+    let encoding = tokenizer
+        .encode(text, false)
+        .map_err(EmbeddingError::Tokenizer)?;
+    let offsets = encoding
+        .get_offsets()
+        .iter()
+        .copied()
+        .filter(|(start, end)| start < end)
+        .collect::<Vec<_>>();
+
+    if offsets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut chunks = Vec::new();
+    let mut start_token = 0;
+
+    while start_token < offsets.len() {
+        let end_token = (start_token + max_content_tokens).min(offsets.len());
+        let start_byte = offsets[start_token].0;
+        let end_byte = offsets[end_token - 1].1;
+        let chunk = text[start_byte..end_byte].trim();
+
+        if !chunk.is_empty() {
+            chunks.push(chunk.to_string());
+        }
+
+        if end_token >= offsets.len() {
+            break;
+        }
+
+        let next_start = end_token.saturating_sub(overlap_tokens);
+        start_token = if next_start <= start_token {
+            end_token
+        } else {
+            next_start
+        };
+    }
+
+    Ok(chunks)
+}
+
 impl EmbeddingsProvider for OrtEmbedder {
     async fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        self.embed_batch_shared(texts).await
+    }
+}
+
+impl OrtEmbedder {
+    pub async fn embed_batch_shared(
+        &self,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -683,8 +799,9 @@ mod tests {
     use super::{
         DEFAULT_MAX_LENGTH, DEFAULT_MODEL_FILE, DEFAULT_MODEL_REPO, DEFAULT_MODEL_REVISION,
         DEFAULT_POOLING_CONFIG_FILE, DEFAULT_TOKENIZER_FILE, DEFAULT_TRANSFORMER_CONFIG_FILE,
-        EmbeddingError, EmbeddingsConfig, TransformerConfig, collect_sentence_embeddings,
-        ensure_existing_path, mean_pool_embeddings, read_json, resolve_asset_path,
+        EmbeddingError, EmbeddingsConfig, TransformerConfig, chunk_text_with_tokenizer,
+        collect_sentence_embeddings, ensure_existing_path, mean_pool_embeddings, read_json,
+        resolve_asset_path,
     };
     use ahash::AHashMap;
     use ndarray::{Array2, Array3, array};
@@ -786,6 +903,23 @@ mod tests {
         build_test_tokenizer().save(&tokenizer_path, false).unwrap();
 
         assert!(tokenizer_path.exists());
+    }
+
+    #[test]
+    fn token_chunking_respects_model_length_with_overlap() {
+        let tokenizer = build_test_tokenizer();
+        let chunks =
+            chunk_text_with_tokenizer(&tokenizer, "hello world hello world hello world", 5, 1)
+                .unwrap();
+
+        assert_eq!(
+            chunks,
+            vec!["hello world hello", "hello world hello", "hello world"]
+        );
+        for chunk in chunks {
+            let encoding = tokenizer.encode(chunk.as_str(), true).unwrap();
+            assert!(encoding.len() <= 5);
+        }
     }
 
     fn build_test_tokenizer() -> Tokenizer {
