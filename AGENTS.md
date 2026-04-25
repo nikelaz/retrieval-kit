@@ -13,7 +13,7 @@ Use Cargo for the full local workflow:
 - `cargo build`: compile the library without running tests.
 
 ## Coding Style & Naming Conventions
-Follow Rust defaults: 4-space indentation, `snake_case` for functions and modules, `CamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Prefer small modules with explicit public APIs over large files. Use `cargo fmt` as the source of truth for formatting.
+Follow Rust defaults: 4-space indentation, `snake_case` for functions and modules, `CamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Use `cargo fmt` as the source of truth for formatting.
 
 ## Commit & Pull Request Guidelines
 Do not commit, open pull requests or interact with git unless explicitly told to do so.
