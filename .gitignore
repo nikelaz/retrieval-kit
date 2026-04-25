@@ -1,2 +1,6 @@
 /target
 .codex
+*.node
+node_modules
+index.js
+index.d.ts

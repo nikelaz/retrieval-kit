@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub mod backends;
 pub mod chunking;
 pub mod embeddings;
+mod node;
 
 pub use chunking::{ChunkingConfig, ChunkingError, chunk_text};
 pub use embeddings::{EmbeddingError, EmbeddingsConfig, EmbeddingsProvider, OrtEmbedder};
