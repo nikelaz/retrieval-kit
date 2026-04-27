@@ -1,9 +1,6 @@
 name: Publish
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +19,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -73,6 +73,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -103,6 +106,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Publish crate
         run: cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
         env:
@@ -120,6 +126,9 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
 
       - name: Setup Node
         uses: actions/setup-node@v4
