@@ -2,7 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, FixedSizeListArray, RecordBatch, StringArray, cast::AsArray, types::Float32Type,
+    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+    UInt64Array, cast::AsArray, types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
@@ -24,6 +25,7 @@ pub struct DocumentRecord {
 
 pub struct Chunk {
     pub document_id: String,
+    pub chunk_index: u64,
     pub text: String,
     pub vector: Vec<f32>,
 }
@@ -101,17 +103,13 @@ impl LanceDbBackend {
             .execute()
             .await?;
 
-        documents_table.add(documents_batch).execute().await?;
-        if let Err(error) = chunks_table.add(chunks_batch).execute().await {
-            for document in documents {
-                let _ = documents_table
-                    .delete(&document_id_predicate(&document.document_id))
-                    .await;
-            }
+        chunks_table.add(chunks_batch).execute().await?;
+        if let Err(error) = documents_table.add(documents_batch).execute().await {
+            self.delete_chunks_for_documents(&chunks_table, documents)
+                .await;
             return Err(error);
         }
-        self.ensure_chunks_vector_index(&chunks_table).await?;
-        self.ensure_chunks_keyword_index(&chunks_table).await?;
+        self.ensure_chunks_indices(&chunks_table).await?;
 
         Ok(())
     }
@@ -119,7 +117,7 @@ impl LanceDbBackend {
     pub async fn upsert_data(&self, document: &DocumentRecord, chunks: &[Chunk]) -> Result<()> {
         let documents_batch = self.documents_batch(std::slice::from_ref(document))?;
         let chunks_batch = self.chunks_batch(chunks)?;
-        let predicate = document_id_predicate(&document.document_id);
+        let previous_chunks = self.chunks_for_document(&document.document_id).await?;
         let documents_table = self
             .connection
             .open_table(DOCUMENTS_TABLE_NAME)
@@ -131,12 +129,19 @@ impl LanceDbBackend {
             .execute()
             .await?;
 
-        documents_table.delete(&predicate).await?;
-        documents_table.add(documents_batch).execute().await?;
-        chunks_table.delete(&predicate).await?;
-        chunks_table.add(chunks_batch).execute().await?;
-        self.ensure_chunks_vector_index(&chunks_table).await?;
-        self.ensure_chunks_keyword_index(&chunks_table).await?;
+        self.merge_replace_document_chunks(&chunks_table, &document.document_id, chunks_batch)
+            .await?;
+        if let Err(error) = self
+            .merge_upsert_documents(&documents_table, documents_batch)
+            .await
+        {
+            let _ = self
+                .restore_document_chunks(&chunks_table, &document.document_id, previous_chunks)
+                .await;
+            return Err(error);
+        }
+
+        self.ensure_chunks_indices(&chunks_table).await?;
 
         Ok(())
     }
@@ -295,6 +300,7 @@ impl LanceDbBackend {
     fn chunks_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("document_id", DataType::Utf8, false),
+            Field::new("chunk_index", DataType::UInt64, false),
             Field::new("text", DataType::Utf8, false),
             Field::new(
                 "vector",
@@ -338,6 +344,9 @@ impl LanceDbBackend {
         let document_id_values = Arc::new(StringArray::from_iter_values(
             data.iter().map(|chunk| chunk.document_id.as_str()),
         ));
+        let chunk_index_values = Arc::new(UInt64Array::from_iter_values(
+            data.iter().map(|chunk| chunk.chunk_index),
+        ));
         let text_values = Arc::new(StringArray::from_iter_values(
             data.iter().map(|chunk| chunk.text.as_str()),
         ));
@@ -351,9 +360,97 @@ impl LanceDbBackend {
 
         Ok(RecordBatch::try_new(
             self.chunks_schema(),
-            vec![document_id_values, text_values, vector_values],
+            vec![
+                document_id_values,
+                chunk_index_values,
+                text_values,
+                vector_values,
+            ],
         )?)
     }
+
+    async fn merge_upsert_documents(&self, table: &Table, batch: RecordBatch) -> Result<()> {
+        let mut merge = table.merge_insert(&["document_id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge.execute(record_batch_reader(batch)).await?;
+        Ok(())
+    }
+
+    async fn merge_replace_document_chunks(
+        &self,
+        table: &Table,
+        document_id: &str,
+        batch: RecordBatch,
+    ) -> Result<()> {
+        let mut merge = table.merge_insert(&["document_id", "chunk_index"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all()
+            .when_not_matched_by_source_delete(Some(document_id_predicate(document_id)));
+        merge.execute(record_batch_reader(batch)).await?;
+        Ok(())
+    }
+
+    async fn restore_document_chunks(
+        &self,
+        table: &Table,
+        document_id: &str,
+        chunks: Vec<Chunk>,
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            table.delete(&document_id_predicate(document_id)).await?;
+            return Ok(());
+        }
+
+        let batch = self.chunks_batch(&chunks)?;
+        self.merge_replace_document_chunks(table, document_id, batch)
+            .await
+    }
+
+    async fn chunks_for_document(&self, document_id: &str) -> Result<Vec<Chunk>> {
+        let table = self
+            .connection
+            .open_table(CHUNKS_TABLE_NAME)
+            .execute()
+            .await?;
+        let rows = table
+            .query()
+            .only_if(document_id_predicate(document_id))
+            .select(Select::columns(&[
+                "document_id",
+                "chunk_index",
+                "text",
+                "vector",
+            ]))
+            .execute()
+            .await?;
+        let batches = rows.try_collect::<Vec<_>>().await?;
+
+        Ok(chunks_from_batches(&batches))
+    }
+
+    async fn delete_chunks_for_documents(&self, table: &Table, documents: &[DocumentRecord]) {
+        for document in documents {
+            let _ = table
+                .delete(&document_id_predicate(&document.document_id))
+                .await;
+        }
+    }
+
+    async fn ensure_chunks_indices(&self, chunks_table: &Table) -> Result<()> {
+        self.ensure_chunks_vector_index(chunks_table).await?;
+        self.ensure_chunks_keyword_index(chunks_table).await
+    }
+}
+
+fn record_batch_reader(batch: RecordBatch) -> Box<dyn arrow_array::RecordBatchReader + Send> {
+    let schema = batch.schema();
+    Box::new(RecordBatchIterator::new(
+        vec![Ok(batch)].into_iter(),
+        schema,
+    ))
 }
 
 fn document_records_from_batches(batches: &[RecordBatch]) -> Vec<DocumentRecord> {
@@ -449,6 +546,53 @@ fn chunk_keyword_search_records_from_batches(
         .collect()
 }
 
+fn chunks_from_batches(batches: &[RecordBatch]) -> Vec<Chunk> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let document_ids = batch
+                .column_by_name("document_id")
+                .expect("chunks query should include document_id")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("document_id column should be Utf8");
+            let chunk_indices = batch
+                .column_by_name("chunk_index")
+                .expect("chunks query should include chunk_index")
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("chunk_index column should be UInt64");
+            let texts = batch
+                .column_by_name("text")
+                .expect("chunks query should include text")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("text column should be Utf8");
+            let vectors = batch
+                .column_by_name("vector")
+                .expect("chunks query should include vector")
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .expect("vector column should be FixedSizeList");
+
+            (0..batch.num_rows())
+                .map(|index| Chunk {
+                    document_id: document_ids.value(index).to_string(),
+                    chunk_index: chunk_indices.value(index),
+                    text: texts.value(index).to_string(),
+                    vector: vectors
+                        .value(index)
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .expect("vector item column should be Float32")
+                        .values()
+                        .to_vec(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn document_id_predicate(document_id: &str) -> String {
     format!("document_id = '{}'", document_id.replace('\'', "''"))
 }
@@ -472,21 +616,25 @@ mod tests {
         vec![
             Chunk {
                 document_id: "demo-doc".to_string(),
+                chunk_index: 0,
                 text: "knight".to_string(),
                 vector: vec![0.9, 0.4, 0.8],
             },
             Chunk {
                 document_id: "demo-doc".to_string(),
+                chunk_index: 1,
                 text: "ranger".to_string(),
                 vector: vec![0.8, 0.4, 0.7],
             },
             Chunk {
                 document_id: "demo-doc".to_string(),
+                chunk_index: 2,
                 text: "priest".to_string(),
                 vector: vec![0.6, 0.2, 0.6],
             },
             Chunk {
                 document_id: "demo-doc".to_string(),
+                chunk_index: 3,
                 text: "rogue".to_string(),
                 vector: vec![0.7, 0.4, 0.7],
             },
@@ -497,11 +645,13 @@ mod tests {
         vec![
             Chunk {
                 document_id: "five-dim-doc".to_string(),
+                chunk_index: 0,
                 text: "mage".to_string(),
                 vector: vec![0.1, 0.2, 0.3, 0.4, 0.5],
             },
             Chunk {
                 document_id: "five-dim-doc".to_string(),
+                chunk_index: 1,
                 text: "paladin".to_string(),
                 vector: vec![0.5, 0.4, 0.3, 0.2, 0.1],
             },
@@ -663,11 +813,13 @@ mod tests {
                 &[
                     Chunk {
                         document_id: "search-doc".to_string(),
+                        chunk_index: 0,
                         text: "rust database rust search".to_string(),
                         vector: vec![0.1, 0.2, 0.3],
                     },
                     Chunk {
                         document_id: "search-doc".to_string(),
+                        chunk_index: 1,
                         text: "ranger path".to_string(),
                         vector: vec![0.4, 0.5, 0.6],
                     },
@@ -722,11 +874,13 @@ mod tests {
                 &[
                     Chunk {
                         document_id: "demo-doc".to_string(),
+                        chunk_index: 0,
                         text: "replacement".to_string(),
                         vector: vec![0.1, 0.2, 0.3],
                     },
                     Chunk {
                         document_id: "demo-doc".to_string(),
+                        chunk_index: 1,
                         text: "next".to_string(),
                         vector: vec![0.4, 0.5, 0.6],
                     },
@@ -772,6 +926,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_preserves_repeated_chunk_text_by_index() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let backend = LanceDbBackend::new(temp_dir.path(), 3).await.unwrap();
+
+        backend.create_tables().await.unwrap();
+        backend
+            .insert_data(&[demo_document()], &demo_chunks())
+            .await
+            .unwrap();
+        backend
+            .upsert_data(
+                &DocumentRecord {
+                    document_id: "demo-doc".to_string(),
+                    content: "repeat repeat".to_string(),
+                },
+                &[
+                    Chunk {
+                        document_id: "demo-doc".to_string(),
+                        chunk_index: 0,
+                        text: "repeat".to_string(),
+                        vector: vec![0.1, 0.2, 0.3],
+                    },
+                    Chunk {
+                        document_id: "demo-doc".to_string(),
+                        chunk_index: 1,
+                        text: "repeat".to_string(),
+                        vector: vec![0.4, 0.5, 0.6],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let table = backend
+            .connection()
+            .open_table(CHUNKS_TABLE_NAME)
+            .execute()
+            .await
+            .unwrap();
+        let rows = table.query().execute().await.unwrap();
+        let batches = rows.try_collect::<Vec<_>>().await.unwrap();
+        let texts = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("text")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["repeat".to_string(), "repeat".to_string()]);
+    }
+
+    #[tokio::test]
     async fn upsert_escapes_document_id_predicate() {
         let temp_dir = tempfile::tempdir().unwrap();
         let backend = LanceDbBackend::new(temp_dir.path(), 3).await.unwrap();
@@ -785,6 +1000,7 @@ mod tests {
                 }],
                 &[Chunk {
                     document_id: "doc-'quoted'".to_string(),
+                    chunk_index: 0,
                     text: "old".to_string(),
                     vector: vec![0.1, 0.2, 0.3],
                 }],
@@ -799,6 +1015,7 @@ mod tests {
                 },
                 &[Chunk {
                     document_id: "doc-'quoted'".to_string(),
+                    chunk_index: 0,
                     text: "new".to_string(),
                     vector: vec![0.4, 0.5, 0.6],
                 }],
@@ -843,11 +1060,13 @@ mod tests {
                 &[
                     Chunk {
                         document_id: "b-doc".to_string(),
+                        chunk_index: 0,
                         text: "second".to_string(),
                         vector: vec![0.1, 0.2, 0.3],
                     },
                     Chunk {
                         document_id: "a-doc".to_string(),
+                        chunk_index: 0,
                         text: "first".to_string(),
                         vector: vec![0.4, 0.5, 0.6],
                     },

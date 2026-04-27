@@ -15,10 +15,11 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
+    "prepack": "npm run build",
+    "pretest": "npm run build:debug",
     "test": "node test/smoke.cjs"
   },
   "napi": {
-    "name": "retrieval-kit",
     "binaryName": "retrieval_kit",
     "targets": [
       "x86_64-unknown-linux-gnu",

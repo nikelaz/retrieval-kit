@@ -525,7 +525,7 @@ impl RKit {
         let mut embedding_iter = embeddings.into_iter();
         let chunk_count = document.chunks.len();
 
-        for text in document.chunks {
+        for (chunk_index, text) in document.chunks.into_iter().enumerate() {
             let vector = embedding_iter.next().ok_or_else(|| {
                 IngestDocumentError::Embeddings(EmbeddingError::MissingOutput(
                     "fewer embeddings returned than chunks provided".to_string(),
@@ -533,6 +533,7 @@ impl RKit {
             })?;
             chunks.push(Chunk {
                 document_id: document.document_id.clone(),
+                chunk_index: chunk_index as u64,
                 text,
                 vector,
             });
@@ -603,7 +604,7 @@ impl RKit {
         for document in prepared_documents {
             let chunk_count = document.chunks.len();
 
-            for text in document.chunks {
+            for (chunk_index, text) in document.chunks.into_iter().enumerate() {
                 let vector = embedding_iter.next().ok_or_else(|| {
                     IngestDocumentError::Embeddings(EmbeddingError::MissingOutput(
                         "fewer embeddings returned than chunks provided".to_string(),
@@ -611,6 +612,7 @@ impl RKit {
                 })?;
                 chunks.push(Chunk {
                     document_id: document.document_id.clone(),
+                    chunk_index: chunk_index as u64,
                     text,
                     vector,
                 });

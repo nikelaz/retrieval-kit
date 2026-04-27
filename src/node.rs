@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 
 use crate::{
     ChunkingConfig, DbEngine, Document, DocumentSummary, EmbeddingsConfig, EmbeddingsProviderKind,
-    IngestDocumentResult, KeywordSearchResult, RKit as InnerRKit, ToolDefinition,
-    ToolDescriptions, VectorSearchResult,
+    IngestDocumentResult, KeywordSearchResult, RKit as InnerRKit, ToolDefinition, ToolDescriptions,
+    VectorSearchResult,
 };
 
 #[napi(object)]
@@ -164,7 +164,12 @@ impl NodeRKit {
             .await
             .ingest_document_files(&pattern)
             .await
-            .map(|results| results.into_iter().map(NodeIngestDocumentResult::from).collect())
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(NodeIngestDocumentResult::from)
+                    .collect()
+            })
             .map_err(to_napi_error)
     }
 
@@ -194,7 +199,12 @@ impl NodeRKit {
             .await
             .vector_search(query, limit as usize)
             .await
-            .map(|results| results.into_iter().map(NodeVectorSearchResult::from).collect())
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(NodeVectorSearchResult::from)
+                    .collect()
+            })
             .map_err(to_napi_error)
     }
 
@@ -209,7 +219,12 @@ impl NodeRKit {
             .await
             .keyword_search(query, limit as usize)
             .await
-            .map(|results| results.into_iter().map(NodeKeywordSearchResult::from).collect())
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(NodeKeywordSearchResult::from)
+                    .collect()
+            })
             .map_err(to_napi_error)
     }
 
@@ -220,7 +235,12 @@ impl NodeRKit {
             .await
             .list_documents()
             .await
-            .map(|documents| documents.into_iter().map(NodeDocumentSummary::from).collect())
+            .map(|documents| {
+                documents
+                    .into_iter()
+                    .map(NodeDocumentSummary::from)
+                    .collect()
+            })
             .map_err(to_napi_error)
     }
 
