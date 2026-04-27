@@ -2,6 +2,8 @@
 name = "retrieval-kit"
 version = "0.1.0"
 edition = "2024"
+description = "A Rust library for local document ingestion, vector search, keyword search, and MCP-style retrieval tool definitions."
+license = "MIT"
 
 [lib]
 crate-type = ["rlib", "cdylib"]
