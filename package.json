@@ -1,5 +1,5 @@
 {
-  "name": "retrieval-kit",
+  "name": "@nikelaz/retrieval-kit",
   "version": "0.1.0",
   "description": "A Rust library for local document ingestion, vector search, keyword search, and MCP-style retrieval tool definitions.",
   "main": "index.js",
